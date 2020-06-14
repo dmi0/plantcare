@@ -1,64 +1,69 @@
 #!/usr/bin/env python3
 import logging
-import os
 from time import sleep
 
-from config import read_loglevel_config, read_max_attempts_config, read_adapter_config, read_sensors_config, \
-    read_telegram_token_config, read_telegram_channel_config
-from notifier import Notifier
+import config
+from messenger import Messenger, AlertMessageRender, RangeCheckerEvaluator
 from plantsensor import PlantSensor, PlantSensorException
 
 _LOGGER = logging.getLogger(__name__)
+_SLEEP = 5
 
 
 def main():
-    max_attempts = read_max_attempts_config()
-    adapter = read_adapter_config()
-    telegram_token = read_telegram_token_config()
-    telegram_channel = read_telegram_channel_config()
-    sensors = None
     try:
-        sensors = read_sensors_config()
+        max_attempts = config.get_max_attempts()
+        adapter = config.get_adapter()
+        telegram_token = config.get_telegram_token()
+        telegram_channel = config.get_telegram_channel()
+        sensors = config.get_sensors()
+        message_parser_mode = config.get_message_parse_mode()
+        message_templates = config.get_message_templates()
     except ValueError as e:
-        _LOGGER.exception("Failed to parse SENSORS configuration", exc_info=e)
+        _LOGGER.exception("Reading configuration failed", exc_info=e)
         exit(1)
-    _LOGGER.info("Configured sensors: {}".format(sensors))
+    else:
+        _LOGGER.info("Configured sensors: {}".format(sensors))
+        message_render = AlertMessageRender(sensors, message_templates)
+        messenger = Messenger(telegram_token, telegram_channel, message_parser_mode, message_render)
+        evaluators = {name: RangeCheckerEvaluator(sensor) for name, sensor in sensors.items()}
+        queue = [PlantSensor(adapter, name, sensor["mac"]) for name, sensor in sensors.items()]
+        success = check_sensors(queue, max_attempts, messenger, evaluators)
+        _LOGGER.info("Done. {}/{} are successfully processed".format(success, len(sensors)))
 
-    notifier = Notifier(telegram_token, telegram_channel)
-    success = check_sensors(notifier, adapter, sensors, max_attempts)
-    _LOGGER.info("Done. {}/{} are successfully processed".format(success, len(sensors)))
+
+def check_sensors(queue, max_attempts, messenger, evaluators):
+    lap = 1
+    total_size = len(queue)
+    to_retry = len(queue)
+    while len(queue) > 0 and lap <= max_attempts:
+        sensor = queue.pop(0)
+        to_retry -= 1
+        try:
+            _check_sensor(sensor, evaluators[sensor.name], messenger)
+        except PlantSensorException as e:
+            queue.append(sensor)
+            if lap < max_attempts:
+                _LOGGER.info(
+                    "{} sensor reading failed, {}/{} attempt{} left ".format(
+                        sensor.name, max_attempts - lap, max_attempts, "s" if max_attempts - lap > 1 else "")
+                )
+            else:
+                _LOGGER.error("{} sensor reading failed".format(sensor.name), exc_info=e)
+        if to_retry == 0:
+            to_retry = len(queue)
+            lap += 1
+            sleep(_SLEEP)
+    return total_size - len(queue)
 
 
-def check_sensors(notifier, adapter, sensors, max_attempts):
-    sensors_to_process = dict((name, max_attempts) for name in sensors)
-    success = 0
-    while True:
-        sensors_to_repeat = {}
-        for name, attempts in sensors_to_process.items():
-            sensor = sensors[name]
-            try:
-                ps = PlantSensor(name, sensor["mac"], adapter)
-                readings = ps.status()
-                _LOGGER.info("{} sensor readings: {}".format(name, readings))
-                notifier.evaluate_n_send(name, sensor["parameter"], sensor["min"], sensor["max"], readings)
-                success += 1
-            except PlantSensorException as e:
-                if attempts > 1:
-                    attempts -= 1
-                    _LOGGER.info(
-                        "{} sensor reading failed, {}/{} attempt{} left ".format(
-                            name, attempts, max_attempts,
-                            "s" if attempts > 1 else "")
-                    )
-                    sensors_to_repeat[name] = attempts
-                else:
-                    _LOGGER.error("{} sensor reading failed".format(name), exc_info=e)
-        if len(sensors_to_repeat) > 0:
-            sleep(5)
-            sensors_to_process = sensors_to_repeat
-        else:
-            break
-    return success
+def _check_sensor(sensor, evaluator, messenger):
+    readings = sensor.read()
+    _LOGGER.info("{} sensor readings: {}".format(sensor.name, readings))
+    for param, value in readings.items():
+        if evaluator.need_to_notify(param, value):
+            _LOGGER.info("{}'s '{}'={} is out of the boundaries".format(sensor.name, param, value))
+            messenger.send(sensor.name, param, value)
 
 
 def evaluate(name, parameter, min_value, max_value, values):
@@ -70,8 +75,7 @@ def evaluate(name, parameter, min_value, max_value, values):
 
 
 if __name__ == '__main__':
-    loglevel = read_loglevel_config()
-    logging.basicConfig(level=os.environ.get("LOGLEVEL", loglevel),
-                        format='%(asctime)s [%(name)-24s] %(levelname)-8s %(message)s')
-
+    loglevel = config.get_loglevel()
+    logging.basicConfig(level=loglevel, format='%(asctime)s [%(name)-24s] %(levelname)-8s %(message)s')
+    _LOGGER.debug("Effective config: {}".format(config.get_all()))
     main()

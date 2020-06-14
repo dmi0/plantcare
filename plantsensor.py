@@ -4,6 +4,11 @@ from bluepy.btle import BTLEException
 from btlewrap import BluepyBackend, BluetoothBackendException
 from miflora.miflora_poller import MiFloraPoller, MI_BATTERY, MI_CONDUCTIVITY, MI_LIGHT, MI_MOISTURE, MI_TEMPERATURE
 
+_param_map = {
+    "light": MI_LIGHT, "temperature": MI_TEMPERATURE, "moisture": MI_MOISTURE,
+    "conductivity": MI_CONDUCTIVITY, "battery": MI_BATTERY
+}
+PARAMETERS = _param_map.keys()
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -14,8 +19,8 @@ class PlantSensorException(Exception):
 class PlantSensor(object):
     _CACHE_TIMEOUT = 5
 
-    def __init__(self, name, mac, adapter="hci0"):
-        self._name = name
+    def __init__(self, adapter, name, mac):
+        self.name = name
         self._mac = mac
         self._adapter = adapter
         self._poller = None
@@ -28,28 +33,29 @@ class PlantSensor(object):
             try:
                 firmware = self._poller.firmware_version()
                 if firmware is None or int(firmware.replace(".", "")) < 319:
-                    raise PlantSensorException(
-                        "Sensor firmware version must not be before 3.1.9, however {} detected".format(firmware)
-                    )
+                    self._fail("Sensor firmware version must not be before 3.1.9, however {} detected".format(firmware))
             except (IOError, BluetoothBackendException, BTLEException, RuntimeError, BrokenPipeError) as e:
-                raise PlantSensorException("Connection to {} failed".format(self._name)) from e
-            _LOGGER.info("Connected to {}".format(self._name))
-            _LOGGER.debug(
-                "Device info: name={}, mac={}, firmware_version={})".format(self._poller.name(), self._mac, firmware)
-            )
+                self._fail("Connection to {} failed".format(self.name), e)
+            else:
+                _LOGGER.info("Connected to {}".format(self.name))
+                _LOGGER.debug(
+                    "Device info: name={}, mac={}, firmware_version={})".format(self._poller.name(), self._mac,
+                                                                                firmware)
+                )
         return self._poller
 
     def _read(self, param):
         try:
             return self._get_poller().parameter_value(param)
         except (IOError, BluetoothBackendException, BTLEException, RuntimeError, BrokenPipeError) as e:
-            raise PlantSensorException("Failed reading '{}' parameter from {}".format(param, self._name)) from e
+            self._fail("Failed reading '{}' parameter from {}".format(param, self.name), e)
 
-    def status(self):
-        return {
-            'light': self._read(MI_LIGHT),
-            'temperature': self._read(MI_TEMPERATURE),
-            'moisture': self._read(MI_MOISTURE),
-            'conductivity': self._read(MI_CONDUCTIVITY),
-            'battery': self._read(MI_BATTERY),
-        }
+    def read(self):
+        return {param_name: self._read(param_key) for (param_name, param_key) in _param_map.items()}
+
+    def _fail(self, msg, e=None):
+        self._poller = None
+        if e is None:
+            raise PlantSensorException(msg)
+        else:
+            raise PlantSensorException(msg) from e
