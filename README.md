@@ -142,3 +142,35 @@ A minimal configuration json can be like this:
 docker run --net host --rm --env CONFIG='{"telegram":{"token":"3059511111:ZZZZ-ZZZZZZZZZZZZZZZZZZZZZZ-AAAAAAA","channel":"-321012345","message":{"moisture":"*{plant}* need to be watered"}},"sensors":{"Rose":{"mac":"10:EA:BA:58:10:B8","wellbeing_range":{"moisture":{"min":40}}}}}' plantcare 
 ```
 PlantCare app doesn't work in a daemon mode. However you can schedule periodical checks by crontab or  [willfarrell/crontab](https://hub.docker.com/r/willfarrell/crontab)
+
+## Troubleshooting
+If you see a connection error in logs, there are many possible reasons besides a typo in the config:
+1) your Bluetooth device is down
+2) LE capabilities are not enabled on your Bluetooth device
+3) both above 
+4) something else
+
+### Bluetooth device is down
+Check it on the host:
+```
+sudo hciconfig
+```
+The device you want to connect should have "UP RUNNING" status. If not run it:
+```
+sudo hciconfig hci0 up
+```
+
+### LE capabilities are not enabled 
+If the device is up and running, but still can't connect to a sensor, try to enable LE:
+```
+sudo btmgmt le on
+```
+
+Remember to do so after reboot. Alternatively, you can do the same in small docker image
+```
+FROM alpine:3.12
+RUN apk add --no-cache bluez-deprecated bluez-btmgmt
+COPY your_script.sh /usr/src/scripts
+CMD [ "ash", "your_script.sh" ]
+```
+And run it (with `--net=host --privileged`) in one docker-compose bundle with PlantCare.
